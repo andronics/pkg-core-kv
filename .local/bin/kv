@@ -1,0 +1,251 @@
+#!/usr/bin/env zsh
+
+# kv - Simple persistent key-value store
+# Version: 2.0.0
+# Uses _cache extension from dotfiles lib v2.0
+
+# Note: Not using 'set -e' to allow graceful error handling
+
+# Script name and directories
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly SCRIPT_DIR="${${(%):-%x}:A:h}"
+
+# ----------------------------------------------------------------------
+# Dependencies
+# ----------------------------------------------------------------------
+
+# Load required library extensions
+_load_library() {
+    local lib_name="$1"
+    local lib_path
+
+    # Try multiple locations
+    for base in \
+        "${SCRIPT_DIR}/../../../lib/.local/bin/lib" \
+        "$HOME/.dotfiles/lib/.local/bin/lib" \
+        "$HOME/.local/bin/lib"; do
+        lib_path="${base}/${lib_name}"
+        if [[ -f "$lib_path" ]] && source "$lib_path" 2>/dev/null; then
+            return 0
+        fi
+    done
+
+    echo "ERROR: Required library '${lib_name}' not found" >&2
+    echo "Please ensure dotfiles lib is properly installed" >&2
+    return 1
+}
+
+# Load dependencies
+_load_library "_cache" || exit 6
+_load_library "_log" || exit 6
+
+# ----------------------------------------------------------------------
+# Configuration
+# ----------------------------------------------------------------------
+
+# Configure cache for persistent storage
+export CACHE_AUTO_PERSIST=true
+export CACHE_PERSIST_FILE="${KV_STORE_FILE:-${XDG_DATA_HOME:-$HOME/.local/share}/kv/store.dat}"
+export CACHE_DEFAULT_TTL=0  # No expiry by default
+
+# KV namespace prefix (isolates kv data in cache)
+readonly KV_NAMESPACE="kv:"
+
+# ----------------------------------------------------------------------
+# Helper Functions
+# ----------------------------------------------------------------------
+
+# Add namespace prefix to key
+_kv_key() { echo "${KV_NAMESPACE}${1}"; }
+
+# Validate key format (alphanumeric + ._:-)
+_kv_validate() {
+    [[ -z "$1" ]] && { log-error "Key cannot be empty"; return 1; }
+    [[ ! "$1" =~ ^[0-9a-zA-Z._:-]+$ ]] && { log-error "Invalid key: '$1'"; return 1; }
+    return 0
+}
+
+# ----------------------------------------------------------------------
+# Core Commands
+# ----------------------------------------------------------------------
+
+kv_set() {
+    _kv_validate "$1" || return 1
+    [[ -z "$2" ]] && { log-error "Value cannot be empty"; return 1; }
+    cache-set "$(_kv_key "$1")" "$2" "${3:-0}" && log-debug "Set '$1' = '$2'"
+}
+
+kv_get() {
+    _kv_validate "$1" || return 1
+    cache-get "$(_kv_key "$1")" || { log-trace "Key not found: $1"; return 1; }
+}
+
+kv_delete() {
+    _kv_validate "$1" || return 1
+    cache-clear "$(_kv_key "$1")" && log-debug "Deleted: $1"
+}
+
+kv_clear() {
+    cache-clear-namespace "$KV_NAMESPACE" && log-info "Cleared all keys"
+}
+
+kv_list() {
+    local pattern="${1:-*}" found=0
+    for key in "${(@k)_CACHE_DATA}"; do
+        if [[ "$key" == ${KV_NAMESPACE}* ]]; then
+            local display_key="${key#$KV_NAMESPACE}"
+            if [[ "$display_key" == ${~pattern} ]]; then
+                echo "key: ${display_key} | value: ${_CACHE_DATA[$key]}"
+                ((found++))
+            fi
+        fi
+    done
+    [[ $found -eq 0 ]] && { log-info "No keys found"; return 1; }
+    return 0
+}
+
+# ----------------------------------------------------------------------
+# Enhanced Commands (New in v2.0)
+# ----------------------------------------------------------------------
+
+kv_stats() {
+    local count=0
+    for key in "${(@k)_CACHE_DATA}"; do
+        [[ "$key" == ${KV_NAMESPACE}* ]] && ((count++))
+    done
+    echo "KV Store Statistics:"
+    echo "  Total Keys: $count"
+    echo "  Location:   ${CACHE_PERSIST_FILE}"
+    echo ""
+    cache-stats
+}
+
+kv_export() {
+    local file="${1:-${XDG_DATA_HOME:-$HOME/.local/share}/kv/export.dat}"
+    mkdir -p "$(dirname "$file")"
+    cache-save "$file" && log-info "Exported to: $file"
+}
+
+kv_import() {
+    local file="${1:-${XDG_DATA_HOME:-$HOME/.local/share}/kv/export.dat}"
+    [[ ! -f "$file" ]] && { log-error "File not found: $file"; return 1; }
+    cache-load "$file" && log-info "Imported from: $file"
+}
+
+# ----------------------------------------------------------------------
+# Data Migration (v1 to v2)
+# ----------------------------------------------------------------------
+
+_kv_migrate() {
+    local legacy_dir="${XDG_DATA_HOME:-$HOME/.local/share}/kv/default"
+    local migrated_marker="${CACHE_PERSIST_FILE}.migrated"
+
+    [[ ! -d "$legacy_dir" || -f "$migrated_marker" ]] && return 0
+
+    log-info "Migrating v1 data to v2..."
+    local count=0 failed=0
+
+    for file in "$legacy_dir"/*; do
+        [[ -f "$file" ]] || continue
+        local key=$(basename "$file")
+        local value=$(cat "$file" 2>/dev/null)
+        if cache-set "$(_kv_key "$key")" "$value" 0 2>/dev/null; then
+            ((count++))
+        else
+            ((failed++))
+            log-warning "Failed to migrate: $key"
+        fi
+    done
+
+    touch "$migrated_marker"
+    log-info "Migration complete: $count migrated, $failed failed"
+
+    if [[ $count -gt 0 ]]; then
+        local backup="${legacy_dir}.backup.$(date +%Y%m%d-%H%M%S)"
+        mv "$legacy_dir" "$backup"
+        log-info "Legacy data backed up to: $backup"
+    fi
+}
+
+# ----------------------------------------------------------------------
+# Usage Information
+# ----------------------------------------------------------------------
+
+kv_usage() {
+    cat <<'EOF'
+kv - Simple persistent key-value store (v2.0.0)
+
+USAGE:
+    kv <command> [arguments]
+
+COMMANDS:
+    set <key> <value> [ttl]    Store key-value pair (optional TTL in seconds)
+    get <key>                  Retrieve value by key
+    delete <key>               Remove key from store
+    clear                      Remove all keys from store
+    list [pattern]             List all key-value pairs (optional glob pattern)
+
+    stats                      Display store statistics
+    export [file]              Export store to file
+    import [file]              Import store from file
+
+    help, --help, -h           Show this help message
+    version, --version, -v     Show version information
+
+EXAMPLES:
+    kv set mykey "my value"            # Store a value
+    kv get mykey                       # Retrieve a value
+    kv delete mykey                    # Delete a key
+    kv set token "abc" 60              # Store with 60s TTL
+    kv list                            # List all keys
+    kv list "user:*"                   # List keys matching pattern
+    kv stats                           # Show statistics
+    kv export backup.dat               # Export to file
+    kv import backup.dat               # Import from file
+
+CONFIGURATION:
+    Store Location: ${CACHE_PERSIST_FILE}
+    Environment Variables:
+      KV_STORE_FILE     Custom store location
+      XDG_DATA_HOME     XDG data directory
+
+DOCUMENTATION:
+    README:  ~/.dotfiles/kv/README.md
+    Library: ~/.dotfiles/lib/.local/docs/lib/_cache.md
+
+EOF
+}
+
+# ----------------------------------------------------------------------
+# Main Dispatcher
+# ----------------------------------------------------------------------
+
+kv_main() {
+    [[ $# -eq 0 ]] && { kv_usage; return 1; }
+
+    local command="$1"
+    shift 2>/dev/null || true
+
+    case "${command}" in
+        set)     kv_set "$@" ;;
+        get)     kv_get "$@" ;;
+        delete)  kv_delete "$@" ;;
+        clear)   kv_clear "$@" ;;
+        list)    kv_list "$@" ;;
+        stats)   kv_stats "$@" ;;
+        export)  kv_export "$@" ;;
+        import)  kv_import "$@" ;;
+        help|--help|-h) kv_usage ;;
+        version|--version|-v) echo "${SCRIPT_NAME} v2.0.0 (using lib/_cache v${CACHE_VERSION})" ;;
+        *) log-error "Unknown command: '${command}'"; echo "Run '${SCRIPT_NAME} help' for usage" >&2; return 1 ;;
+    esac
+}
+
+# ----------------------------------------------------------------------
+# Initialization & Execution
+# ----------------------------------------------------------------------
+
+mkdir -p "$(dirname "$CACHE_PERSIST_FILE")"
+cache-init
+_kv_migrate
+kv_main "$@"
