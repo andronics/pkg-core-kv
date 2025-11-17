@@ -221,7 +221,7 @@ jobs:
         run: |
           echo "Installing pkg-cli..."
           mkdir -p ~/.pkg-cli/bin
-          curl -fsSL https://raw.githubusercontent.com/andronics/pkg-cli/main/bin/pkg-cli -o ~/.pkg-cli/bin/pkg-cli
+          curl -fsSL https://raw.githubusercontent.com/andronics/pkg-cli/trunk/bin/pkg-cli -o ~/.pkg-cli/bin/pkg-cli
           chmod +x ~/.pkg-cli/bin/pkg-cli
           echo "$HOME/.pkg-cli/bin" >> $GITHUB_PATH
 
